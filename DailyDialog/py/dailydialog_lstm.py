@@ -31,12 +31,12 @@ import math
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
 
-!pwd
-
+"""
 import zipfile
 
 with zipfile.ZipFile('/content/drive/My Drive/dataset/Cornell-Movie-Quotes-Corpus/cornell_movie_dialogs_corpus.zip') as existing_zip:
     existing_zip.extractall('/content/drive/My Drive/dataset/Cornell-Movie-Quotes-Corpus/')
+"""
 
 corpus_name = "cornell movie-dialogs corpus"
 corpus = os.path.join("/content/drive/My Drive/dataset/Cornell-Movie-Quotes-Corpus/", corpus_name)
@@ -126,6 +126,8 @@ with open(datafile, 'w', encoding='utf-8') as outputfile:
 # Print a sample of lines
 print("\nSample lines from file:")
 printLines(datafile)
+
+print(len(lines))
 
 # Default word tokens
 PAD_token = 0  # Used for padding short sentences
@@ -238,6 +240,7 @@ save_dir = os.path.join("data", "save")
 voc, pairs = loadPrepareData(corpus, corpus_name, datafile, save_dir)
 # Print some pairs to validate
 print("\npairs:")
+print(len(pairs))
 for pair in pairs[:10]:
     print(pair)
 
@@ -288,9 +291,9 @@ def binaryMatrix(l, value=PAD_token):
         m.append([])
         for token in seq:
             if token == PAD_token:
-                m[i].append(0)
+                m[i].append(False)
             else:
-                m[i].append(1)
+                m[i].append(True)
     return m
 
 # Returns padded input sequence tensor and lengths
@@ -307,7 +310,7 @@ def outputVar(l, voc):
     max_target_len = max([len(indexes) for indexes in indexes_batch])
     padList = zeroPadding(indexes_batch)
     mask = binaryMatrix(padList)
-    mask = torch.ByteTensor(mask)
+    mask = torch.BoolTensor(mask) #paddingを0に、それ以外を1に
     padVar = torch.LongTensor(padList)
     return padVar, mask, max_target_len
 
@@ -327,12 +330,13 @@ def batch2TrainData(voc, pair_batch):
 small_batch_size = 5
 batches = batch2TrainData(voc, [random.choice(pairs) for _ in range(small_batch_size)])
 input_variable, lengths, target_variable, mask, max_target_len = batches
-
+"""
 print("input_variable:", input_variable)
 print("lengths:", lengths)
 print("target_variable:", target_variable)
 print("mask:", mask)
 print("max_target_len:", max_target_len)
+"""
 
 class EncoderRNN(nn.Module):
     def __init__(self, hidden_size, embedding, n_layers=1, dropout=0):
@@ -346,16 +350,19 @@ class EncoderRNN(nn.Module):
         self.gru = nn.GRU(hidden_size, hidden_size, n_layers,
                           dropout=(0 if n_layers == 1 else dropout), bidirectional=True)
 
+    # (10, 64), (64)
     def forward(self, input_seq, input_lengths, hidden=None):
         # Convert word indexes to embeddings
         embedded = self.embedding(input_seq)
-        # Pack padded batch of sequences for RNN module
+        # データの系列長を固定する
         packed = nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
+        #print("packed", packed.shape)
         # Forward pass through GRU
         outputs, hidden = self.gru(packed, hidden)
         # Unpack padding
         outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs)
         # Sum bidirectional GRU outputs
+        # 前方向の隠れ状態と、後ろ方向の隠れ状態を足している
         outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:]
         # Return output and final hidden state
         return outputs, hidden
@@ -457,7 +464,7 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, encode
     decoder_optimizer.zero_grad()
 
     # Set device options
-    input_variable = input_variable.to(device)
+    input_variable = input_variable.to(device) #(64, 10)
     lengths = lengths.to(device)
     target_variable = target_variable.to(device)
     mask = mask.to(device)
@@ -496,7 +503,7 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, encode
     else:
         for t in range(max_target_len):
             decoder_output, decoder_hidden = decoder(
-                decoder_input, decoder_hidden, encoder_outputs反復
+                decoder_input, decoder_hidden, encoder_outputs
             )
             # No teacher forcing: next input is decoder's own current output
             _, topi = decoder_output.topk(1)
@@ -541,7 +548,7 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, deco
     for iteration in range(start_iteration, n_iteration + 1):
         training_batch = training_batches[iteration - 1]
         # Extract fields from batch
-        input_variable, lengths, target_variable, mask, max_target_len = training_batch
+        input_variable, lengths, target_variable, mask, max_target_len = training_batch #(10, 64), (64), (10, 64), (10, 64)
 
         # Run a training iteration with batch
         loss = train(input_variable, lengths, target_variable, mask, max_target_len, encoder,
@@ -709,6 +716,7 @@ if loadFilename:
 
 # Run training iterations
 print("Starting Training!")
+
 trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer,
            embedding, encoder_n_layers, decoder_n_layers, save_dir, n_iteration, batch_size,
            print_every, save_every, clip, corpus_name, loadFilename)
@@ -723,14 +731,16 @@ searcher = GreedySearchDecoder(encoder, decoder)
 # Begin chatting (uncomment and run the following line to begin)
 evaluateInput(encoder, decoder, searcher, voc)
 
-encoder
+type(voc.index2word)
 
-decoder
+import pickle
 
-training_batches = [batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
-                      for _ in range(n_iteration)]#(4000, 5, 10, 64) (iteration, smallbatch_size, MAX_LENGTH, batch_size)
+model_path = '/content/drive/My Drive/dataset/DailyDialog/chatbot_encoder0714.pth'
+torch.save(encoder.to('cpu').state_dict(), model_path)
+model_path = '/content/drive/My Drive/dataset/DailyDialog/chatbot_decoder0714.pth'
+torch.save(decoder.to('cpu').state_dict(), model_path)
 
-len(training_batches[0][0][0])
-
-training_batch = training_batches[iteration - 1]
-input_variable, lengths, target_variable, mask, max_target_len = training_batch
+with open('/content/drive/My Drive/dataset/DailyDialog/voc_word2index0714.pkl', 'wb') as f:
+    pickle.dump(voc.word2index, f)
+with open('/content/drive/My Drive/dataset/DailyDialog/voc_index2word.pkl', 'wb') as f:
+    pickle.dump(voc.index2word, f)
