@@ -26,16 +26,25 @@ device = torch.device("cuda" if USE_CUDA else "cpu")
 import pandas as pd
 
 df = pd.read_csv('drive/My Drive/dataset/DailyDialog/train.csv', header=None)
-df.head()
-
-len(df)
+df_val = pd.read_csv('drive/My Drive/dataset/DailyDialog/validation.csv', header=None)
+df_test = pd.read_csv('drive/My Drive/dataset/DailyDialog/test.csv', header=None)
 
 inp = df[0].to_list()
 opt = df[1].to_list()
+inp_val = df_val[0].to_list()
+opt_val = df_val[1].to_list()
+inp_test = df_test[0].to_list()
+opt_test = df_test[1].to_list()
 
 pairs = []
 for i, o in zip(inp, opt):
   pairs.append([i,o])
+pairs_val = []
+for i, o in zip(inp_val, opt_val):
+  pairs_val.append([i,o])
+pairs_test = []
+for i, o in zip(inp_test, opt_test):
+  pairs_test.append([i,o])
 
 len(pairs)
 
@@ -43,6 +52,7 @@ len(pairs)
 PAD_token = 0  # Used for padding short sentences
 SOS_token = 1  # Start-of-sentence token
 EOS_token = 2  # End-of-sentence token
+UNK_token = 3
 
 class Voc:
     def __init__(self, name):
@@ -50,8 +60,8 @@ class Voc:
         self.trimmed = False
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS"}
-        self.num_words = 3  # Count SOS, EOS, PAD
+        self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS", UNK_token:"UNK"}
+        self.num_words = 4  # Count SOS, EOS, PAD, UNK
 
     def addSentence(self, sentence):
         for word in sentence.split(' '):
@@ -86,8 +96,8 @@ class Voc:
         # Reinitialize dictionaries
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS"}
-        self.num_words = 3 # Count default tokens
+        self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS", UNK_token:"UNK"}
+        self.num_words = 4 # Count default tokens
 
         for word in keep_words:
             self.addWord(word)
@@ -203,9 +213,12 @@ def trimRareWords(voc, pairs, MIN_COUNT):
 # Trim voc and pairs
 pairs = trimRareWords(voc, pairs, MIN_COUNT)
 
+#word2index
 def indexesFromSentence(voc, sentence):
-    return [voc.word2index[word] for word in sentence.split(' ')] + [EOS_token]
+    #return [voc.word2index[word] for word in sentence.split(' ')] + [EOS_token]
+    return [voc.word2index[word] if word in voc.word2index else UNK_token for word in sentence.split(' ')] + [EOS_token]
 
+#[i if i % 2 == 0 else "odd" for i in range(10)]
 
 def zeroPadding(l, fillvalue=PAD_token):
     return list(itertools.zip_longest(*l, fillvalue=fillvalue))
@@ -390,6 +403,9 @@ def maskNLLLoss(inp, target, mask):
 
 def train(input_variable, lengths, target_variable, mask, max_target_len, encoder, decoder, embedding,
           encoder_optimizer, decoder_optimizer, batch_size, clip, max_length=MAX_LENGTH):
+  
+    encoder.train()
+    decoder.train()
 
     # Zero gradients
     encoder_optimizer.zero_grad()
@@ -460,6 +476,66 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, encode
 
     return sum(print_losses) / n_totals
 
+def val(input_variable, lengths, target_variable, mask, max_target_len, encoder, decoder, embedding,
+          batch_size, max_length=MAX_LENGTH):
+
+    encoder.eval()
+    decoder.eval()
+
+    # Set device options
+    input_variable = input_variable.to(device) #(64, 10)
+    lengths = lengths.to(device)
+    target_variable = target_variable.to(device)
+    mask = mask.to(device)
+
+    # Initialize variables
+    loss = 0
+    print_losses = []
+    n_totals = 0
+
+    # Forward pass through encoder
+    encoder_outputs, encoder_hidden = encoder(input_variable, lengths)
+
+    # Create initial decoder input (start with SOS tokens for each sentence)
+    decoder_input = torch.LongTensor([[SOS_token for _ in range(batch_size)]])
+    decoder_input = decoder_input.to(device)
+
+    # Set initial decoder hidden state to the encoder's final hidden state
+    decoder_hidden = encoder_hidden[:decoder.n_layers]
+
+    # Determine if we are using teacher forcing this iteration
+    use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
+
+    # Forward batch of sequences through decoder one time step at a time
+    if use_teacher_forcing:
+        for t in range(max_target_len):
+            decoder_output, decoder_hidden = decoder(
+                decoder_input, decoder_hidden, encoder_outputs
+            )
+            # Teacher forcing: next input is current target
+            decoder_input = target_variable[t].view(1, -1)
+            # Calculate and accumulate loss
+            mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[t], mask[t])
+            loss += mask_loss
+            print_losses.append(mask_loss.item() * nTotal)
+            n_totals += nTotal
+    else:
+        for t in range(max_target_len):
+            decoder_output, decoder_hidden = decoder(
+                decoder_input, decoder_hidden, encoder_outputs
+            )
+            # No teacher forcing: next input is decoder's own current output
+            _, topi = decoder_output.topk(1)
+            decoder_input = torch.LongTensor([[topi[i][0] for i in range(batch_size)]])
+            decoder_input = decoder_input.to(device)
+            # Calculate and accumulate loss
+            mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[t], mask[t])
+            loss += mask_loss
+            print_losses.append(mask_loss.item() * nTotal)
+            n_totals += nTotal
+
+    return sum(print_losses) / n_totals
+
 def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer, embedding, 
                encoder_n_layers, decoder_n_layers, save_dir, n_iteration, batch_size, print_every, save_every, clip, 
                corpus_name, loadFilename):
@@ -467,11 +543,14 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, deco
     # Load batches for each iteration
     training_batches = [batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
                       for _ in range(n_iteration)]
+    training_batches_val = [batch2TrainData(voc, [random.choice(pairs_val) for _ in range(batch_size)])
+                      for _ in range(n_iteration)] 
 
     # Initializations
     print('Initializing ...')
     start_iteration = 1
     print_loss = 0
+    print_loss_val = 0
     if loadFilename:
         start_iteration = checkpoint['iteration'] + 1
 
@@ -479,19 +558,30 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, deco
     print("Training...")
     for iteration in range(start_iteration, n_iteration + 1):
         training_batch = training_batches[iteration - 1]
+        training_batch_val = training_batches_val[iteration - 1]
         # Extract fields from batch
         input_variable, lengths, target_variable, mask, max_target_len = training_batch #(10, 64), (64), (10, 64), (10, 64)
+        input_variable_val, lengths_val, target_variable_val, mask_val, max_target_len_val = training_batch_val
 
         # Run a training iteration with batch
         loss = train(input_variable, lengths, target_variable, mask, max_target_len, encoder,
                      decoder, embedding, encoder_optimizer, decoder_optimizer, batch_size, clip)
         print_loss += loss
 
+        ###ここで評価データ
+        
+        loss_val = val(input_variable_val, lengths_val, target_variable_val, mask_val, max_target_len_val, encoder,
+                     decoder, embedding, batch_size)
+        print_loss_val += loss_val
+
         # Print progress
         if iteration % print_every == 0:
             print_loss_avg = print_loss / print_every
-            print("Iteration: {}; Percent complete: {:.1f}%; Average loss: {:.4f}".format(iteration, iteration / n_iteration * 100, print_loss_avg))
+            print_loss_avg_val = print_loss_val / print_every
+            print("Iteration: {}; Percent complete: {:.1f}%; Average loss: {:.4f}; ppl: {:.4f}".format(iteration, iteration / n_iteration * 100, print_loss_avg, math.exp(print_loss_avg) ))
+            print("Iteration_val: {}; Percent complete: {:.1f}%; Average loss: {:.4f}; ppl: {:.4f}".format(iteration, iteration / n_iteration * 100, print_loss_avg_val, math.exp(print_loss_avg_val) ))
             print_loss = 0
+            print_loss_val = 0
 
         # Save checkpoint
         if (iteration % save_every == 0):
