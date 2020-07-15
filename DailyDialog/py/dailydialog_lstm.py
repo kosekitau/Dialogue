@@ -403,7 +403,7 @@ def maskNLLLoss(inp, target, mask):
 
 def train(input_variable, lengths, target_variable, mask, max_target_len, encoder, decoder, embedding,
           encoder_optimizer, decoder_optimizer, batch_size, clip, max_length=MAX_LENGTH):
-  
+
     encoder.train()
     decoder.train()
 
@@ -536,18 +536,20 @@ def val(input_variable, lengths, target_variable, mask, max_target_len, encoder,
 
     return sum(print_losses) / n_totals
 
-def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer, embedding, 
-               encoder_n_layers, decoder_n_layers, save_dir, n_iteration, batch_size, print_every, save_every, clip, 
+def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer, embedding,
+               encoder_n_layers, decoder_n_layers, save_dir, n_iteration, batch_size, print_every, save_every, clip,
                corpus_name, loadFilename):
 
     # Load batches for each iteration
     training_batches = [batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
                       for _ in range(n_iteration)]
     training_batches_val = [batch2TrainData(voc, [random.choice(pairs_val) for _ in range(batch_size)])
-                      for _ in range(n_iteration)] 
+                      for _ in range(n_iteration)]
 
     # Initializations
     print('Initializing ...')
+    result = []
+    result_val = []
     start_iteration = 1
     print_loss = 0
     print_loss_val = 0
@@ -569,7 +571,7 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, deco
         print_loss += loss
 
         ###ここで評価データ
-        
+
         loss_val = val(input_variable_val, lengths_val, target_variable_val, mask_val, max_target_len_val, encoder,
                      decoder, embedding, batch_size)
         print_loss_val += loss_val
@@ -578,7 +580,9 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, deco
         if iteration % print_every == 0:
             print_loss_avg = print_loss / print_every
             print_loss_avg_val = print_loss_val / print_every
-            print("Iteration: {}; Percent complete: {:.1f}%; Average loss: {:.4f}; ppl: {:.4f}".format(iteration, iteration / n_iteration * 100, print_loss_avg, math.exp(print_loss_avg) ))
+            result.append(print_loss_avg)
+            result_val.append(print_loss_avg_val)
+            print("Iteration_tra: {}; Percent complete: {:.1f}%; Average loss: {:.4f}; ppl: {:.4f}".format(iteration, iteration / n_iteration * 100, print_loss_avg, math.exp(print_loss_avg) ))
             print("Iteration_val: {}; Percent complete: {:.1f}%; Average loss: {:.4f}; ppl: {:.4f}".format(iteration, iteration / n_iteration * 100, print_loss_avg_val, math.exp(print_loss_avg_val) ))
             print_loss = 0
             print_loss_val = 0
@@ -598,6 +602,8 @@ def trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, deco
                 'voc_dict': voc.__dict__,
                 'embedding': embedding.state_dict()
             }, os.path.join(directory, '{}_{}.tar'.format(iteration, 'checkpoint')))
+
+    return result, result_val
 
 class GreedySearchDecoder(nn.Module):
     def __init__(self, encoder, decoder):
@@ -742,9 +748,20 @@ if loadFilename:
 # Run training iterations
 print("Starting Training!")
 
-trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer,
+loss, loss_val = trainIters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer,
            embedding, encoder_n_layers, decoder_n_layers, save_dir, n_iteration, batch_size,
            print_every, save_every, clip, corpus_name, loadFilename)
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+epochs = range(1, n_iteration+1)
+
+plt.plot(epochs, loss, 'bo',  label='Training loss')
+plt.plot(epochs, loss_val, 'b', color='red', label='Validation loss')
+plt.title('Training and Validation loss')
+plt.legend()
+plt.show()
 
 # Set dropout layers to eval mode
 encoder.eval()
@@ -769,4 +786,3 @@ with open('/content/drive/My Drive/dataset/DailyDialog/voc_word2index0714.pkl', 
 with open('/content/drive/My Drive/dataset/DailyDialog/voc_index2word.pkl', 'wb') as f:
     pickle.dump(voc.index2word, f)
 """
-
