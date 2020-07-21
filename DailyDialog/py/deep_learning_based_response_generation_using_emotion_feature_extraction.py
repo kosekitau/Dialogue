@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 
 import string
 import re
@@ -177,46 +178,207 @@ class LuongAttnDecoderRNN(nn.Module):
 
     #                            encoder_hidden, encoder_outputs
     def forward(self, input_step, last_hidden, encoder_outputs):
-        # Note: we run this one step (word) at a time
-        # Get embedding of current input word
         embedded = self.embedding(input_step)
         embedded = self.embedding_dropout(embedded)
         embedded = embedded.unsqueeze(1)
-        # Forward through unidirectional GRU
+
         rnn_output, hidden = self.gru(embedded, last_hidden) #[64, 1, 500] [2, 64, 500]
         energy = self.score(encoder_outputs) # [64, 30, 500]
         attn_weights = torch.sum(rnn_output*energy, dim=2) #(64, 30)
         attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(1) # (64, 1, 30)
-        # Multiply attention weights to encoder outputs to get new "weighted sum" context vector
+
         context = attn_weights.bmm(encoder_outputs) #(64, 1, 500)
-        # Concatenate weighted context vector and GRU output using Luong eq. 5
-        print('rnn_output.shape',rnn_output.shape)
         rnn_output = rnn_output.squeeze(1) #(64, 500)
-        print('rnn_output', rnn_output.shape) 
-        print('context',context.shape)
         context = context.squeeze(1) #(64, 500)
-        print('context',context.shape)
         concat_input = torch.cat((rnn_output, context), 1) #(64, 1000)
         concat_output = torch.tanh(self.concat(concat_input))
-        # Predict next word using Luong eq. 6
         output = self.out(concat_output)
         output = F.softmax(output, dim=1)
-        # Return output and final hidden state
+
         return output, hidden
 
+"""
 model_name = 'cb_model'
 #attn_model = 'dot'
 attn_model = 'general'
 #attn_model = 'concat'
 
-decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, len(TRG.vocab.stoi),decoder_n_layers, dropout)
+decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, len(TRG.vocab.stoi), decoder_n_layers, dropout)
 decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)])
 embedding = nn.Embedding(len(SRC.vocab.stoi), hidden_size)
 
-decoder_hn = encoder_hidden[:decoder.n_layers] #最終層の隠れ状態を使う
-print(decoder_hn.shape)
-print(encoder_outputs.shape)
-decoder_output, decoder_hidden = decoder(
-                decoder_input, decoder_hn, encoder_outputs
-            )
+decoder_hidden = encoder_hidden[:decoder.n_layers]
+target_variable = batch.trg[0].to(device)
+loss = nn.CrossEntropyLoss()
+
+l = 0
+for t in range(30):
+  decoder_output, decoder_hidden = decoder(
+      decoder_input, decoder_hidden, encoder_outputs
+  ) #[64, 単語種類数], [2, 64, 500]
+  # Teacher forcing: next input is current target
+  decoder_input = target_variable[:, t] #[64], teaching_forceの場合、正解データを次に入力する
+  l += loss(decoder_output, target_variable[:, t])
+  # Calculate and accumulate loss
+  
+l.backward()
+"""
+
+def binaryMatrix(l, value=TRG.vocab.stoi['<pad>']):
+    m = []
+    for i, seq in enumerate(l):
+      if seq == TRG.vocab.stoi['<pad>']:
+        m.append(False)
+      else:
+        m.append(True)
+    return m
+
+def maskNLLLoss(inp, target):
+    mask = target
+    mask = binaryMatrix(mask)
+    mask = torch.BoolTensor(mask)
+    mask = mask.to(device)
+    nTotal = mask.sum()
+    crossEntropy = -torch.log(torch.gather(inp, 1, target.view(-1, 1)).squeeze(1))
+    loss = crossEntropy.masked_select(mask).mean()
+    loss = loss.to(device)
+    return loss, nTotal.item()
+
+def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder, 
+                 encoder_optimizer, decoder_optimizer, criterion, phase):
+  total_loss = 0 #1batchのloss
+  # Zero gradients
+  encoder_optimizer.zero_grad()
+  decoder_optimizer.zero_grad()
+  n_totals = 0
+  print_losses = []
+  
+  #エンコーダの出力
+  encoder_outputs, encoder_hidden = encoder(input_variable)
+  #['<cls>']を生成
+  decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)]) #[64]
+  decoder_input = decoder_input.to(device)
+  #エンコーダの最後の隠れ状態を使用
+  decoder_hidden = encoder_hidden[:decoder.n_layers] #[2, 64, 500]
+
+  #teaching_forceを使う
+  loss = 0 #1batchの中の1センテンスのloss
+  use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
+
+  if use_teacher_forcing:
+    for t in range(max_target_len):
+      decoder_output, decoder_hidden = decoder(
+          decoder_input, decoder_hidden, encoder_outputs
+      ) #[64, 単語種類数], [2, 64, 500]
+      # Teacher forcing: next input is current target
+      decoder_input = target_variable[:, t] #[64], teaching_forceの場合、正解データを次に入力する
+      #loss += criterion(decoder_output, target_variable[:, t])
+      mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[:, t])
+      loss += mask_loss
+      print_losses.append(mask_loss.item() * nTotal)
+      n_totals += nTotal
+    #total_loss += loss / max_target_len #1バッチ分のloss
+    
+  else:
+    for t in range(max_target_len):
+      decoder_output, decoder_hidden = decoder(
+          decoder_input, decoder_hidden, encoder_outputs
+      ) #[64, 単語種類数], [2, 64, 500]
+      # Teacher forcing: next input is current target
+      _, topi = decoder_output.topk(1)
+      decoder_input = torch.LongTensor([topi[i] for i in range(batch_size)])
+      decoder_input = decoder_input.to(device)
+      #loss += criterion(decoder_output, target_variable[:, t])
+      mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[:, t])
+      loss += mask_loss
+      print_losses.append(mask_loss.item() * nTotal)
+      n_totals += nTotal
+    #total_loss += (loss / max_target_len) #1バッチ分のloss
+    
+  if phase == 'train':
+    loss.backward()
+    #total_loss.backward()
+    _ = nn.utils.clip_grad_norm_(encoder.parameters(), clip)
+    _ = nn.utils.clip_grad_norm_(decoder.parameters(), clip)
+
+    encoder_optimizer.step()
+    decoder_optimizer.step()
+  return sum(print_losses) / n_totals
+  #return total_loss #1バッチ分のloss
+
+import random
+
+def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion):
+    print("Training...")
+    #エポック
+    for epoch in range(num_epochs):
+      for phase in ['train', 'val']:
+        if phase == 'train':
+          encoder.train()
+          decoder.train()
+        else:
+          encoder.eval()
+          decoder.eval()
+        print_loss = 0 #1epochのloss
+
+        for i, batch in enumerate(dataloaders_dict[phase]): 
+          input_variable = batch.src[0].to(device) #(64, 30)
+          target_variable = batch.trg[0].to(device) #(64, 30)
+          max_target_len = max(batch.trg[1])
+          if target_variable.shape[0] == 64:
+            total_loss = a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, phase) #1バッチ分のloss     
+            print_loss += total_loss #1epochのlossをprint_lossに加えていく
+
+        #損失をだす
+        print("epoch: {}; phase: {}; Average loss: {:.4f}".format(epoch+1, phase, print_loss/i ))
+
+# Configure models
+model_name = 'cb_model'
+#attn_model = 'dot'
+attn_model = 'general'
+#attn_model = 'concat'
+hidden_size = 500
+encoder_n_layers = 2
+decoder_n_layers = 2
+dropout = 0.1
+batch_size = 64
+
+en_embedding = nn.Embedding(len(SRC.vocab.stoi), hidden_size)
+de_embedding = nn.Embedding(len(TRG.vocab.stoi), hidden_size)
+
+encoder = EncoderRNN(hidden_size, en_embedding, encoder_n_layers, dropout)
+decoder = LuongAttnDecoderRNN(attn_model, de_embedding, hidden_size, len(TRG.vocab.stoi), decoder_n_layers, dropout)
+
+encoder = encoder.to(device)
+decoder = decoder.to(device)
+criterion = nn.CrossEntropyLoss(ignore_index=TRG.vocab.stoi['<pad>'])
+print('Models built and ready to go!')
+
+from torch import optim
+
+clip = 1.0
+teacher_forcing_ratio = 1.0
+learning_rate = 0.0001
+decoder_learning_ratio = 5.0
+num_epochs = 3
+
+dataloaders_dict = {"train": train_dl, "val": val_dl}
+
+# Ensure dropout layers are in train mode
+encoder.train()
+decoder.train()
+
+# Initialize optimizers
+print('Building optimizers ...')
+encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
+decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate * decoder_learning_ratio)
+
+# Run training iterations
+print("Starting Training!")
+"""
+RuntimeError: CUDA out of memory. Tried to allocate 62.00 MiB (GPU 0; 11.17 GiB total capacity; 9.44 GiB 
+already allocated; 39.81 MiB free; 10.82 GiB reserved in total by PyTorch)
+GPU使用量でエラーでる
+"""
+train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
 
