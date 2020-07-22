@@ -60,7 +60,7 @@ TRG = torchtext.data.Field(sequential=True, use_vocab=True, tokenize=tokenizer_w
 
 #pandasでcsvを保存するときに、labelをintでキャストしておかないとエラーでるから注意
 train_ds, val_ds, test_ds = torchtext.data.TabularDataset.splits(
-    path='drive/My Drive/dataset/DailyDialog/', train='train.csv', validation='validation.csv', 
+    path='drive/My Drive/dataset/DailyDialog/', train='train.csv', validation='validation.csv',
     test='test.csv', format='csv', fields=[('src', SRC), ('trg', TRG)])
 
 SRC.build_vocab(train_ds)
@@ -76,6 +76,8 @@ batch = next(iter(val_dl))
 print(batch.src[0].shape)
 print(batch.trg[0].shape)
 
+"""
+#Tutorial
 class EncoderRNN(nn.Module):
     def __init__(self, hidden_size, embedding, n_layers=1, dropout=0):
         super(EncoderRNN, self).__init__()
@@ -92,20 +94,36 @@ class EncoderRNN(nn.Module):
         outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:]
         # Return output and final hidden state
         return outputs, hidden
+"""
 
-hidden_size = 500
-encoder_n_layers = 2
-decoder_n_layers = 2
+class EncoderRNN(nn.Module):
+  def __init__(self, hidden_size, vocab_size, dropout=0):
+    super(EncoderRNN, self).__init__()
+    self.hidden_size = hidden_size
+    self.embedding = nn.Embedding(vocab_size, hidden_size)
+    self.lstm = nn.LSTM(hidden_size, hidden_size, batch_first=True, bidirectional=True)
+    self.thought = nn.Linear(hidden_size*2, hidden_size)
+
+
+  def forward(self, input_seq, hidden=None):
+    embedded = self.embedding(input_seq) #[64, 30, 600]
+    outputs, (hn, cn) = self.lstm(embedded) #[64, 30, 1200], ([2, 64, 600], [2, 64, 600])
+    outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:] #[64, 30, 600]
+    thought_vector = torch.cat((hn[0], cn[0]), -1) #[64, 1200]
+    thought_vector = self.thought(thought_vector) #[64, 600]
+
+    return outputs, thought_vector
+
+hidden_size = 600
 dropout = 0.1
 batch_size = 64
 
 batch = next(iter(val_dl))
 print(batch.src[0].shape)
 
-embedding = nn.Embedding(len(SRC.vocab.stoi), hidden_size)
-encoder = EncoderRNN(hidden_size, embedding, encoder_n_layers, dropout)
-encoder_outputs, encoder_hidden = encoder(batch.src[0])
-print(encoder_hidden.shape)
+encoder = EncoderRNN(hidden_size, len(SRC.vocab.stoi), dropout)
+encoder_outputs, thought_vector = encoder(batch.src[0])
+print(thought_vector.shape)
 
 class LuongAttnDecoderRNN(nn.Module):
     def __init__(self, attn_model, embedding, hidden_size, output_size, n_layers=1, dropout=0.1):
@@ -126,20 +144,25 @@ class LuongAttnDecoderRNN(nn.Module):
         self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
 
-        self.attn = Attn(attn_model, hidden_size)
+        #self.attn = Attn(attn_model, hidden_size)
 
     #                            encoder_hidden, encoder_outputs
     def forward(self, input_step, last_hidden, encoder_outputs):
         embedded = self.embedding(input_step)
         embedded = self.embedding_dropout(embedded)
         embedded = embedded.unsqueeze(1)
-        
+        print(embedded.shape)
+
         rnn_output, hidden = self.gru(embedded, last_hidden) #[64, 1, 500] [2, 64, 500]
+        print('encoder_outputs', encoder_outputs.shape)
         energy = self.score(encoder_outputs) # [64, 30, 500]
+        print('energy', energy.shape)
         attn_weights = torch.sum(rnn_output*energy, dim=2) #[64, 30]
+        print('attn_weight', attn_weights.shape)
         attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(1) # [64, 1, 30]
 
         context = attn_weights.bmm(encoder_outputs) #[64, 1, 500]
+        print('context', context.shape)
         rnn_output = rnn_output.squeeze(1) #[64, 500]
         context = context.squeeze(1) #[64, 500]
         concat_input = torch.cat((rnn_output, context), 1) #[64, 1000]
@@ -149,7 +172,6 @@ class LuongAttnDecoderRNN(nn.Module):
 
         return output, hidden
 
-"""
 model_name = 'cb_model'
 #attn_model = 'dot'
 attn_model = 'general'
@@ -158,23 +180,14 @@ attn_model = 'general'
 decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, len(TRG.vocab.stoi), decoder_n_layers, dropout)
 decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)])
 embedding = nn.Embedding(len(SRC.vocab.stoi), hidden_size)
+print(decoder_input.shape)
+
 
 decoder_hidden = encoder_hidden[:decoder.n_layers]
-target_variable = batch.trg[0].to(device)
-loss = nn.CrossEntropyLoss()
-
-l = 0
-for t in range(30):
-  decoder_output, decoder_hidden = decoder(
-      decoder_input, decoder_hidden, encoder_outputs
-  ) #[64, 単語種類数], [2, 64, 500]
-  # Teacher forcing: next input is current target
-  decoder_input = target_variable[:, t] #[64], teaching_forceの場合、正解データを次に入力する
-  l += loss(decoder_output, target_variable[:, t])
-  # Calculate and accumulate loss
-  
-l.backward()
-"""
+decoder_output, decoder_hidden = decoder(
+    decoder_input, decoder_hidden, encoder_outputs
+) #[64, 単語種類数], [2, 64, 500]
+# Teacher forcing: next input is current target
 
 def binaryMatrix(l, value=TRG.vocab.stoi['<pad>']):
     m = []
@@ -196,7 +209,7 @@ def maskNLLLoss(inp, target):
     loss = loss.to(device)
     return loss, nTotal.item()
 
-def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder, 
+def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder,
                  encoder_optimizer, decoder_optimizer, criterion, phase):
   total_loss = 0 #1batchのloss
   # Zero gradients
@@ -204,7 +217,7 @@ def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decod
   decoder_optimizer.zero_grad()
   n_totals = 0
   print_losses = []
-  
+
   #エンコーダの出力
   encoder_outputs, encoder_hidden = encoder(input_variable)
   #['<cls>']を生成
@@ -230,7 +243,7 @@ def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decod
       print_losses.append(mask_loss.item() * nTotal)
       n_totals += nTotal
     #total_loss += loss / max_target_len #1バッチ分のloss
-    
+
   else:
     for t in range(max_target_len):
       decoder_output, decoder_hidden = decoder(
@@ -246,7 +259,7 @@ def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decod
       print_losses.append(mask_loss.item() * nTotal)
       n_totals += nTotal
     #total_loss += (loss / max_target_len) #1バッチ分のloss
-    
+
   if phase == 'train':
     loss.backward()
     #total_loss.backward()
@@ -273,12 +286,12 @@ def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimize
           decoder.eval()
         print_loss = 0 #1epochのloss
 
-        for i, batch in enumerate(dataloaders_dict[phase]): 
+        for i, batch in enumerate(dataloaders_dict[phase]):
           input_variable = batch.src[0].to(device) #(64, 30)
           target_variable = batch.trg[0].to(device) #(64, 30)
           max_target_len = max(batch.trg[1])
           if target_variable.shape[0] == 64:
-            total_loss = a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, phase) #1バッチ分のloss     
+            total_loss = a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, phase) #1バッチ分のloss
             print_loss += total_loss #1epochのlossをprint_lossに加えていく
 
         #損失をだす
@@ -328,7 +341,7 @@ decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate * decoder_
 # Run training iterations
 print("Starting Training!")
 """
-RuntimeError: CUDA out of memory. Tried to allocate 62.00 MiB (GPU 0; 11.17 GiB total capacity; 9.44 GiB 
+RuntimeError: CUDA out of memory. Tried to allocate 62.00 MiB (GPU 0; 11.17 GiB total capacity; 9.44 GiB
 already allocated; 39.81 MiB free; 10.82 GiB reserved in total by PyTorch)
 GPU使用量でエラーでる
 """
@@ -353,14 +366,14 @@ class GreedySearchDecoder(nn.Module):
             all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
             all_scores = torch.cat((all_scores, decoder_scores), dim=0)
             #decoder_input = torch.unsqueeze(decoder_input, 0)
-            
+
         return all_tokens, all_scores
 
 import unicodedata
 
 def indexesFromSentence(sentence):
     return [SRC.vocab.stoi[word] if word in SRC.vocab.stoi else SRC.vocab.stoi['<unk>'] for word in sentence.split(' ')]
-    
+
 def unicodeToAscii(s):
     return ''.join(
         c for c in unicodedata.normalize('NFD', s)
@@ -406,4 +419,3 @@ decoder.eval()
 searcher = GreedySearchDecoder(encoder, decoder)
 
 evaluateInput(encoder, decoder, searcher)
-
