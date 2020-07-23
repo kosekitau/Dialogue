@@ -110,10 +110,11 @@ class EncoderRNN(nn.Module):
     outputs, (hn, cn) = self.lstm(embedded) #[64, 30, 1200], ([2, 64, 600], [2, 64, 600])
     outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:] #[64, 30, 600]
     thought_vector = torch.cat((hn[0], cn[0]), -1) #[64, 1200]
-    thought_vector = self.thought(thought_vector) #[64, 600]
+    thought_vector = self.thought(thought_vector).unsqueeze(0) #[1, 64, 600]
 
     return outputs, thought_vector
 
+#エンコーダテスト
 hidden_size = 600
 dropout = 0.1
 batch_size = 64
@@ -125,69 +126,104 @@ encoder = EncoderRNN(hidden_size, len(SRC.vocab.stoi), dropout)
 encoder_outputs, thought_vector = encoder(batch.src[0])
 print(thought_vector.shape)
 
+"""
+#Tutorial
 class LuongAttnDecoderRNN(nn.Module):
-    def __init__(self, attn_model, embedding, hidden_size, output_size, n_layers=1, dropout=0.1):
-        super(LuongAttnDecoderRNN, self).__init__()
+  def __init__(self, attn_model, embedding, hidden_size, output_size, n_layers=1, dropout=0.1):
+    super(LuongAttnDecoderRNN, self).__init__()
+    self.attn_model = attn_model
+    self.hidden_size = hidden_size
+    self.output_size = output_size
+    self.n_layers = n_layers
+    self.dropout = dropout
 
-        # Keep for reference
-        self.attn_model = attn_model
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.n_layers = n_layers
-        self.dropout = dropout
+    self.embedding = embedding
+    self.embedding_dropout = nn.Dropout(dropout)
+    self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=(0 if n_layers == 1 else dropout), batch_first=True)
+    self.score = nn.Linear(hidden_size, hidden_size)
+    self.concat = nn.Linear(hidden_size * 2, hidden_size)
+    self.out = nn.Linear(hidden_size, output_size)
 
-        # Define layers
-        self.embedding = embedding
-        self.embedding_dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=(0 if n_layers == 1 else dropout), batch_first=True)
-        self.score = nn.Linear(hidden_size, hidden_size)
-        self.concat = nn.Linear(hidden_size * 2, hidden_size)
-        self.out = nn.Linear(hidden_size, output_size)
+  def forward(self, input_step, last_hidden, encoder_outputs):
+    embedded = self.embedding(input_step)
+    embedded = self.embedding_dropout(embedded)
+    embedded = embedded.unsqueeze(1)
 
-        #self.attn = Attn(attn_model, hidden_size)
+    rnn_output, hidden = self.gru(embedded, last_hidden) #[64, 1, 500] [2, 64, 500]
+    print('encoder_outputs', encoder_outputs.shape)
+    energy = self.score(encoder_outputs) # [64, 30, 500]
+    print('energy', energy.shape)
+    attn_weights = torch.sum(rnn_output*energy, dim=2) #[64, 30]
+    print('attn_weight', attn_weights.shape)
+    attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(1) # [64, 1, 30]
 
-    #                            encoder_hidden, encoder_outputs
-    def forward(self, input_step, last_hidden, encoder_outputs):
-        embedded = self.embedding(input_step)
-        embedded = self.embedding_dropout(embedded)
-        embedded = embedded.unsqueeze(1)
-        print(embedded.shape)
+    context = attn_weights.bmm(encoder_outputs) #[64, 1, 500]
+    print('context', context.shape)
+    rnn_output = rnn_output.squeeze(1) #[64, 500]
+    context = context.squeeze(1) #[64, 500]
+    concat_input = torch.cat((rnn_output, context), 1) #[64, 1000]
+    concat_output = torch.tanh(self.concat(concat_input))
+    output = self.out(concat_output)
+    output = F.softmax(output, dim=1)
 
-        rnn_output, hidden = self.gru(embedded, last_hidden) #[64, 1, 500] [2, 64, 500]
-        print('encoder_outputs', encoder_outputs.shape)
-        energy = self.score(encoder_outputs) # [64, 30, 500]
-        print('energy', energy.shape)
-        attn_weights = torch.sum(rnn_output*energy, dim=2) #[64, 30]
-        print('attn_weight', attn_weights.shape)
-        attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(1) # [64, 1, 30]
+    return output, hidden
+"""
 
-        context = attn_weights.bmm(encoder_outputs) #[64, 1, 500]
-        print('context', context.shape)
-        rnn_output = rnn_output.squeeze(1) #[64, 500]
-        context = context.squeeze(1) #[64, 500]
-        concat_input = torch.cat((rnn_output, context), 1) #[64, 1000]
-        concat_output = torch.tanh(self.concat(concat_input))
-        output = self.out(concat_output)
-        output = F.softmax(output, dim=1)
+class LuongAttnDecoderRNN(nn.Module):
+  def __init__(self, hidden_size, output_size, dropout=0.1):
+    super(LuongAttnDecoderRNN, self).__init__()
+    self.hidden_size = hidden_size
+    self.output_size = output_size
+    self.dropout = dropout
 
-        return output, hidden
+    self.embedding = nn.Embedding(output_size, hidden_size)
+    self.embedding_dropout = nn.Dropout(dropout)
+    self.lstm = nn.LSTM(hidden_size, hidden_size, batch_first=True)
+    self.score = nn.Linear(hidden_size, hidden_size)
+    self.concat = nn.Linear(hidden_size * 2, hidden_size)
+    self.out = nn.Linear(hidden_size, output_size)
 
-model_name = 'cb_model'
-#attn_model = 'dot'
-attn_model = 'general'
-#attn_model = 'concat'
+  def forward(self, input_step, decoder_hidden, encoder_outputs):
+    embedded = self.embedding(input_step)
+    embedded = self.embedding_dropout(embedded)
+    embedded = embedded.unsqueeze(1) #[64, 1, 600]
+    print(embedded.shape)
 
-decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, len(TRG.vocab.stoi), decoder_n_layers, dropout)
+    #記憶セルはencoderから引っ張ってこない
+    rnn_output, hidden = self.lstm(embedded, decoder_hidden) #[64, 1, 600] ([1, 64, 600], [1, 64, 600])
+    print('encoder_outputs', encoder_outputs.shape)
+    energy = self.score(encoder_outputs) # [64, 30, 600]
+    print('energy', energy.shape)
+    attn_weights = torch.sum(rnn_output*energy, dim=2) #[64, 30]
+    print('attn_weight', attn_weights.shape)
+    attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(1) # [64, 1, 30]
+
+    context = attn_weights.bmm(encoder_outputs) #[64, 1, 500]
+    print('context', context.shape)
+    rnn_output = rnn_output.squeeze(1) #[64, 500]
+    context = context.squeeze(1) #[64, 500]
+    concat_input = torch.cat((rnn_output, context), 1) #[64, 1000]
+    concat_output = torch.tanh(self.concat(concat_input))
+    output = self.out(concat_output)
+    output = F.softmax(output, dim=1)
+
+    return output, hidden
+
+decoder = LuongAttnDecoderRNN(hidden_size, len(TRG.vocab.stoi),  dropout)
 decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)])
 embedding = nn.Embedding(len(SRC.vocab.stoi), hidden_size)
 print(decoder_input.shape)
 
+cn = torch.zeros(1, batch_size, hidden_size)
+#cn = torch.zeros(1, batch_size, hidden_size, device=device)
+decoder_hidden = (thought_vector, cn)
 
-decoder_hidden = encoder_hidden[:decoder.n_layers]
 decoder_output, decoder_hidden = decoder(
     decoder_input, decoder_hidden, encoder_outputs
 ) #[64, 単語種類数], [2, 64, 500]
-# Teacher forcing: next input is current target
+
+print('decoder_output', decoder_output.shape)
+print('decoder_hidden', decoder_hidden[0].shape)
 
 def binaryMatrix(l, value=TRG.vocab.stoi['<pad>']):
     m = []
