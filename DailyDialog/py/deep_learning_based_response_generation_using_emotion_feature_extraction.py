@@ -250,8 +250,6 @@ for t in range(30):
   # Teacher forcing: next input is current target
   _, topi = decoder_output.topk(1)
   decoder_input = torch.LongTensor([topi[i] for i in range(batch_size)])
-  #decoder_input = decoder_input.to(device)
-  #loss += criterion(decoder_output, target_variable[:, t])
   mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[:, t])
   
 decoder_output, decoder_hidden = decoder(
@@ -350,9 +348,7 @@ def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimize
         #損失をだす
         print("epoch: {}; phase: {}; Average loss: {:.4f}; PPL: {:.4f}".format(epoch+1, phase, print_loss/i, math.exp(print_loss/i) ))
 
-hidden_size = 500
-encoder_n_layers = 2
-decoder_n_layers = 2
+hidden_size = 600
 dropout = 0.1
 batch_size = 64
 
@@ -369,7 +365,7 @@ clip = 1.0
 teacher_forcing_ratio = 1.0
 learning_rate = 0.0001
 decoder_learning_ratio = 5.0
-num_epochs = 3
+num_epochs = 5
 
 dataloaders_dict = {"train": train_dl, "val": val_dl}
 
@@ -388,9 +384,9 @@ class GreedySearchDecoder(nn.Module):
         self.decoder = decoder
 
     def forward(self, input_seq, input_length, max_length):
-        encoder_outputs, encoder_hidden = self.encoder(input_seq)
-        decoder_hidden = encoder_hidden[:decoder.n_layers] #最終層の隠れ状態を使う
-        print(decoder_hidden.shape)
+        encoder_outputs, thought_vector = self.encoder(input_seq)
+        cn = torch.zeros(1, 1, hidden_size).to(device)
+        decoder_hidden = (thought_vector, cn)
         decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>']]).to(device)
         all_tokens = torch.zeros([0], device=device, dtype=torch.long)
         all_scores = torch.zeros([0], device=device)
