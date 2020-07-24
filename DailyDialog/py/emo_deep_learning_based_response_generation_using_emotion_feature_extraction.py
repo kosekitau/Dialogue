@@ -111,7 +111,7 @@ def label2one_hot(emotion):
   result = torch.zeros(batch_size, emotion_size)
   for i, e in enumerate(emotion):
     result[i][e] = 1.
-  return result
+  return result.to(device)
 
 #エンコーダテスト
 hidden_size = 600
@@ -207,3 +207,124 @@ decoder_output, decoder_hidden = decoder(
 
 print('decoder_output', decoder_output.shape)
 print('decoder_hidden', decoder_hidden[0].shape)
+
+def a_batch_loss(input_variable, target_variable, emotion, max_target_len, encoder, decoder, 
+                 encoder_optimizer, decoder_optimizer, criterion, phase):
+  total_loss = 0 #1batchのloss
+  # Zero gradients
+  encoder_optimizer.zero_grad()
+  decoder_optimizer.zero_grad()
+  n_totals = 0
+  print_losses = []
+  
+  #エンコーダの出力
+  encoder_outputs, thought_vector = encoder(input_variable, emotion)
+  #['<cls>']を生成
+  decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)]) #[64]
+  decoder_input = decoder_input.to(device)
+  #エンコーダの最後の隠れ状態を使用、記憶セルは0を入力
+  cn = torch.zeros(1, batch_size, hidden_size, device=device)
+  decoder_hidden = (thought_vector, cn)
+
+  #teaching_forceを使う
+  loss = 0 #1batchの中の1センテンスのloss
+  use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
+
+  if use_teacher_forcing:
+    for t in range(max_target_len):
+      decoder_output, decoder_hidden = decoder(
+          decoder_input, decoder_hidden, encoder_outputs
+      ) #[64, 単語種類数], [2, 64, 500]
+      # Teacher forcing: next input is current target
+      decoder_input = target_variable[:, t] #[64], teaching_forceの場合、正解データを次に入力する
+      #loss += criterion(decoder_output, target_variable[:, t])
+      mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[:, t])
+      loss += mask_loss
+      print_losses.append(mask_loss.item() * nTotal)
+      n_totals += nTotal
+    #total_loss += loss / max_target_len #1バッチ分のloss
+    
+  else:
+    for t in range(max_target_len):
+      decoder_output, decoder_hidden = decoder(
+          decoder_input, decoder_hidden, encoder_outputs
+      ) #[64, 単語種類数], [2, 64, 500]
+      # Teacher forcing: next input is current target
+      _, topi = decoder_output.topk(1)
+      decoder_input = torch.LongTensor([topi[i] for i in range(batch_size)])
+      decoder_input = decoder_input.to(device)
+      #loss += criterion(decoder_output, target_variable[:, t])
+      mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[:, t])
+      loss += mask_loss
+      print_losses.append(mask_loss.item() * nTotal)
+      n_totals += nTotal
+    #total_loss += (loss / max_target_len) #1バッチ分のloss
+    
+  if phase == 'train':
+    loss.backward()
+    #total_loss.backward()
+    _ = nn.utils.clip_grad_norm_(encoder.parameters(), clip)
+    _ = nn.utils.clip_grad_norm_(decoder.parameters(), clip)
+
+    encoder_optimizer.step()
+    decoder_optimizer.step()
+  return sum(print_losses) / n_totals
+  #return total_loss #1バッチ分のloss
+
+import random
+
+def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion):
+  print("Training...")
+  #エポック
+  for epoch in range(num_epochs):
+    for phase in ['train', 'val']:
+      if phase == 'train':
+        encoder.train()
+        decoder.train()
+      else:
+        encoder.eval()
+        decoder.eval()
+      print_loss = 0 #1epochのloss
+
+      for i, batch in enumerate(dataloaders_dict[phase]): 
+        input_variable = batch.src[0].to(device) #(64, 30)
+        target_variable = batch.trg[0].to(device) #(64, 30)
+        emotion = batch.label_src
+        emotion = label2one_hot(emotion)
+        max_target_len = max(batch.trg[1])
+        if target_variable.shape[0] == 64:
+          total_loss = a_batch_loss(input_variable, target_variable, emotion, max_target_len, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, phase) #1バッチ分のloss     
+          print_loss += total_loss #1epochのlossをprint_lossに加えていく
+
+      #損失をだす
+      print("epoch: {}; phase: {}; Average loss: {:.4f}; PPL: {:.4f}".format(epoch+1, phase, print_loss/i, math.exp(print_loss/i) ))
+
+hidden_size = 600
+dropout = 0.1
+batch_size = 64
+
+encoder = EncoderRNN(hidden_size, len(SRC.vocab.stoi), emotion_size, dropout)
+decoder = LuongAttnDecoderRNN(hidden_size, len(TRG.vocab.stoi),  dropout)
+
+encoder = encoder.to(device)
+decoder = decoder.to(device)
+criterion = nn.CrossEntropyLoss(ignore_index=TRG.vocab.stoi['<pad>'])
+
+from torch import optim
+
+clip = 1.0
+teacher_forcing_ratio = 1.0
+learning_rate = 0.0001
+decoder_learning_ratio = 5.0
+num_epochs = 5
+
+dataloaders_dict = {"train": train_dl, "val": val_dl}
+
+encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
+decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate * decoder_learning_ratio)
+
+encoder.train()
+decoder.train()
+
+train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+
