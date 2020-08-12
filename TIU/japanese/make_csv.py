@@ -42,8 +42,10 @@ def make(path):
                 opt.append(' '.join(opt_parse))
         df = pd.DataFrame({0:inp, 1:opt})
         df = df.drop_duplicates()
+        df = df.sample(frac=1, random_state=13)
         print('len:', len(df))
-        df.to_csv(path + '.csv', header=None, index=None)
+        df[:-10000].to_csv('train_' + path + '.csv', header=None, index=None)
+        df[-10000:].to_csv('val_' + path + '.csv', header=None, index=None)
 
 paths = ['tiu_twitter']
 for path in paths:
