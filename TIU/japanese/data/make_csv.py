@@ -25,6 +25,7 @@ def normalizeString(text):
     s = re.sub(r'　', ' ', s)                    #全角空白の除去
     s = re.sub(r'req:', '', s)
     s = re.sub(r'res:', '', s)
+    s = re.sub(r'[^a-zA-Zあ-ん一-龥0-9、。,.!? ]', '', s) 
     return s
 
 def make(path):
