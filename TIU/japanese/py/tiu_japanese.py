@@ -28,7 +28,7 @@ SRC = torchtext.data.Field(sequential=True, use_vocab=True,
 
 TRG = torchtext.data.Field(sequential=True, use_vocab=True, 
                             lower=True, include_lengths=True, batch_first=True, fix_length=MAX_LENGTH,
-                            eos_token='<eos>')
+                            init_token='<cls>', eos_token='<eos>')
 
 #pandasでcsvを保存するときに、labelをintでキャストしておかないとエラーでるから注意
 train_ds, val_ds = torchtext.data.TabularDataset.splits(
@@ -163,7 +163,7 @@ decoder_hidden = (thought_vector, cn)
 target_variable = batch.trg[0]
 
 
-for t in range(30):
+for t in range(MAX_LENGTH):
   decoder_output, decoder_hidden = decoder(
       decoder_input, decoder_hidden, encoder_outputs
   ) #[64, 単語種類数], [2, 64, 500]
@@ -202,7 +202,7 @@ def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decod
   use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
 
   if use_teacher_forcing:
-    for t in range(max_target_len):
+    for t in range(max_target_len - 1):
       decoder_output, decoder_hidden = decoder(
           decoder_input, decoder_hidden, encoder_outputs
       ) #[64, 単語種類数], [2, 64, 500]
@@ -216,7 +216,7 @@ def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decod
     #total_loss += loss / max_target_len #1バッチ分のloss
     
   else:
-    for t in range(max_target_len):
+    for t in range(max_target_len - 1):
       decoder_output, decoder_hidden = decoder(
           decoder_input, decoder_hidden, encoder_outputs
       ) #[64, 単語種類数], [2, 64, 500]
@@ -258,7 +258,7 @@ def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimize
 
       for i, batch in enumerate(dataloaders_dict[phase]): 
         input_variable = batch.src[0].to(device) #(64, 30)
-        target_variable = batch.trg[0].to(device) #(64, 30)
+        target_variable = batch.trg[0][:, 1:].to(device) #(64, 30)
         max_target_len = max(batch.trg[1])
         if target_variable.shape[0] == batch_size:
           total_loss = a_batch_loss(input_variable, target_variable, max_target_len, encoder, decoder, encoder_optimizer, decoder_optimizer, phase) #1バッチ分のloss     
@@ -267,7 +267,7 @@ def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimize
       #損失をだす
       print("epoch: {}; phase: {}; Average loss: {:.4f}; PPL: {:.4f}".format(epoch+1, phase, print_loss/i, math.exp(print_loss/i) ))
 
-hidden_size = 600
+hidden_size = 1000
 dropout = 0.1
 
 clip = 1.0
@@ -290,7 +290,6 @@ encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
 decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate*decoder_learning_rate )
 
 encoder.train()
-
 decoder.train()
 
 train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer)
