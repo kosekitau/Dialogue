@@ -43,30 +43,49 @@ class EncoderRNN(nn.Module):
 en = EncoderRNN(300, 600, 2, True, 2000, None, dropout=0)
 outputs, encoder_hidden = en(torch.randint(0, 1000, size=(128, 20)))
 
-torch.stack(a, 0).shape
+class DecoderRNN(nn.Module):
+  def __init__(self, emb_size, hidden_size, num_layers, text_embedding_vectors, output_size, dropout=0.1):
+    super(DecoderRNN, self).__init__()
+    self.hidden_size = hidden_size
+    self.output_size = output_size
+    self.dropout = dropout
+    if text_embedding_vectors == None:
+      self.embedding = nn.Embedding(output_size, emb_size)
+    else:
+      self.embedding = nn.Embedding.from_pretrained(
+          embeddings=text_embedding_vectors, freeze=True)
+    self.embedding_dropout = nn.Dropout(dropout)
+    self.lstm = nn.LSTM(emb_size, hidden_size, num_layers, batch_first=True)
+    self.out = nn.Linear(hidden_size, output_size)
+    
+  def forward(self, input_step, decoder_hidden, encoder_outputs):
+    embedded = self.embedding(input_step)
+    embedded = self.embedding_dropout(embedded)
+    embedded = embedded.unsqueeze(1) #[batch, 1, hidden]
+    print(embedded.shape)
+    
+    #記憶セルはencoderから引っ張ってこない
+    rnn_output, hidden = self.lstm(embedded, decoder_hidden) #[128, 1, 600] ([1, batch, hidden], [1, batch, hidden])
+    attn_weights = torch.matmul(rnn_output, encoder_outputs.transpose(2, 1))
+    attn_weights = F.softmax(attn_weights, -1)
+    attn_applied = torch.bmm(attn_weights, encoder_outputs) # [1,1,256]
+    output = rnn_output + attn_applied
+    output = output.squeeze(1)
+    print(output.shape)
+    output = self.out(output)
+    output = F.softmax(output, dim=1)
+    print(output.shape)
 
-lstm = nn.LSTM(300, 600, 2, batch_first=True, bidirectional=True)
-input = torch.randn(128, 20, 300)
-h0 = torch.randn(4, 128, 600)
-c0 = torch.randn(4, 128, 600)
-output, (hn, cn) = lstm(input, (h0, c0))
+    return output, hidden
 
-output.shape
+en = EncoderRNN(300, 600, 2, True, 2000, None, dropout=0)
+de = DecoderRNN(300, 600, 2, None, 1000)
+outputs, encoder_hidden = en(torch.randint(0, 1000, size=(128, 20)))
+print(outputs.shape)
+cn = torch.zeros(2, 128, 600)
+decoder_hidden = (encoder_hidden, cn)
 
-hn.shape
+outputs, hidden = de(torch.randint(0, 1000, size=(128,)), decoder_hidden, outputs)
 
-#num_layer, num_directions
-hn2 = hn.view(2, 2, 128, 600)
-
-hn[3, 0, :] == hn2[1, 1, 0, :]
-
-hn[0]
-
-output[0, 0, :600].shape
-
-hn[1, 0, 0, :].shape
-
-output[0, 0, 600:] == hn[1, 1, 0, :]
-
-2*False
+print(outputs.shape)
 
