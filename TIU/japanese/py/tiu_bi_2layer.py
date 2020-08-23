@@ -102,7 +102,7 @@ class DecoderRNN(nn.Module):
     self.embedding_dropout = nn.Dropout(self.dropout)
     self.lstm = nn.LSTM(emb_size, hidden_size, num_layers, batch_first=True)
     self.out_dropout = nn.Dropout(self.dropout)
-    self.out = nn.Linear(hidden_size, output_size)
+    self.out = nn.Linear(hidden_size*2, output_size)
     
   def forward(self, input_step, decoder_hidden, encoder_outputs):
     embedded = self.embedding(input_step)
@@ -114,13 +114,20 @@ class DecoderRNN(nn.Module):
     attn_weights = torch.matmul(rnn_output, encoder_outputs.transpose(2, 1))
     attn_weights = F.softmax(attn_weights, -1)
     attn_applied = torch.bmm(attn_weights, encoder_outputs) 
-    output = rnn_output + attn_applied
+    #output = rnn_output + attn_applied
+    output = torch.cat((rnn_output, attn_applied), dim=2)
     output = output.squeeze(1)
     output = self.out_dropout(output)
     output = self.out(output)
     output = F.softmax(output, dim=1)
 
     return output, hidden
+
+decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)])
+de = DecoderRNN(300, 600, 2, None, 2000, dropout=0)
+cn = torch.zeros(2, batch_size, 600)
+decoder_hidden = (encoder_hidden, cn)
+decoder_outputs, hidden = de(decoder_input, decoder_hidden, outputs)
 
 def binaryMatrix(l, value=TRG.vocab.stoi['<pad>']):
     m = []
@@ -231,7 +238,7 @@ def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimize
       print("epoch: {}; phase: {}; Average loss: {:.4f}; PPL: {:.4f}".format(epoch+1, phase, print_loss/i, math.exp(print_loss/i) ))
 
 emb_size = 300
-hidden_size = 500
+hidden_size = 600
 num_layers = 2
 bidirectional = True
 dropout = 0.7
@@ -260,4 +267,110 @@ decoder.train()
 
 
 train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer)
+
+import pickle
+
+model_path = '/content/drive/My Drive/model/TIU_encoder0819.pth'
+torch.save(encoder.to('cpu').state_dict(), model_path)
+model_path = '/content/drive/My Drive/model/TIU_decoder0819.pth'
+torch.save(decoder.to('cpu').state_dict(), model_path)
+
+model_path = '/content/drive/My Drive/model/cuda_TIU_encoder0819.pth'
+torch.save(encoder.to('cuda').state_dict(), model_path)
+model_path = '/content/drive/My Drive/model/cuda_TIU_decoder0819.pth'
+torch.save(decoder.to('cuda').state_dict(), model_path)
+
+with open('/content/drive/My Drive/model/src_word2index0819.pkl', 'wb') as f:
+    pickle.dump(SRC.vocab.stoi, f)
+with open('/content/drive/My Drive/model/trg_word2index0819.pkl', 'wb') as f:
+    pickle.dump(TRG.vocab.itos, f)
+
+class GreedySearchDecoder(nn.Module):
+    def __init__(self, encoder, decoder):
+        super(GreedySearchDecoder, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, input_seq, input_length, max_length):
+        encoder_outputs, thought_vector = self.encoder(input_seq)
+        cn = torch.zeros(2, 1, hidden_size).to(device)
+        decoder_hidden = (thought_vector, cn)
+        decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>']]).to(device)
+        all_tokens = torch.zeros([0], device=device, dtype=torch.long)
+        all_scores = torch.zeros([0], device=device)
+        for _ in range(max_length):
+            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
+            decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
+            all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
+            all_scores = torch.cat((all_scores, decoder_scores), dim=0)
+            #decoder_input = torch.unsqueeze(decoder_input, 0)
+            
+        return all_tokens, all_scores
+
+import unicodedata
+import re
+
+#単語分割、id振り
+#sp.EncodeAsPieces("こんにちは、僕はゴリラです。")
+def indexesFromSentence(sentence):
+    return [SRC.vocab.stoi[word] if word in SRC.vocab.stoi else SRC.vocab.stoi['<unk>'] for word in sp.EncodeAsPieces(sentence)]
+
+def unicodeToAscii(s):
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', s)
+        if unicodedata.category(c) != 'Mn'
+    )
+
+def normalizeString(text):
+    s = unicodeToAscii(text.lower().strip())
+    s = re.sub(r"([.!?])", r"\1", text)
+    s = re.sub(r"\s+", r" ", s).strip()
+    s = re.sub(r'[【】]', '', s)                  # 【】の除去
+    s = re.sub(r'[（）()]', '', s)                # （）の除去
+    s = re.sub(r'[［］\[\]]', '', s)              # ［］の除去
+    s = re.sub(r'[\r]', '', s)
+    s = re.sub(r'　', ' ', s)                    #全角空白の除去
+    s = re.sub(r'[^a-zA-Zぁ-んァ-ン一-龥0-9、。,.!?ー ]', '', s)
+    return s
+
+
+def evaluate(encoder, decoder, searcher, sentence, max_length):
+    indexes_batch = indexesFromSentence(sentence)
+    lengths = len(indexes_batch)
+    input_batch = torch.LongTensor(indexes_batch).view(1, -1).to(device)
+    tokens, scores = searcher(input_batch, lengths, max_length)
+    decoded_words = [TRG.vocab.itos[token.item()] for token in tokens]
+    return decoded_words
+
+def evaluate_beam(encoder, decoder, searcher, sentence, max_length=MAX_LENGTH):
+    indexes_batch = indexesFromSentence(sentence) #[]
+    lengths = len(indexes_batch)
+    input_batch = torch.LongTensor(indexes_batch).view(1, -1).to(device) #[1, ]
+    encoder_outputs, decoder_hidden = encoder(input_batch, label2one_hot([0])) #[64, 30, 600], [1, 64, 600]
+
+    tokens, scores = searcher(input_batch, lengths, max_length)
+    decoded_words = [TRG.vocab.itos[token.item()] for token in tokens]
+    return decoded_words  
+
+
+def evaluateInput(encoder, decoder, searcher):
+    input_sentence = ''
+    while(1):
+        try:
+            input_sentence = input('> ').lower()
+            if input_sentence == 'q' or input_sentence == 'quit': break
+            #前処理
+            input_sentence = normalizeString(input_sentence)
+            output_words = evaluate(encoder, decoder, searcher, input_sentence, MAX_LENGTH)
+            output_words[:] = [x for x in output_words if not (x == '<eos>' or x == '<pad>')]
+            print('Bot:', ' '.join(output_words))
+
+        except KeyError:
+            print("Error: Encountered unknown word.")
+
+encoder.eval()
+decoder.eval()
+
+searcher = GreedySearchDecoder(encoder, decoder)
+evaluateInput(encoder, decoder, searcher)
 
