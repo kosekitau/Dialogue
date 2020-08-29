@@ -32,7 +32,7 @@ TRG = torchtext.data.Field(sequential=True, use_vocab=True,
 
 #pandasでcsvを保存するときに、labelをintでキャストしておかないとエラーでるから注意
 train_ds, val_ds = torchtext.data.TabularDataset.splits(
-    path='/content/drive/My Drive/dataset/TIU/twitter/5_20', train='train.csv', validation='val.csv', 
+    path='/content/drive/My Drive/dataset/TIU/twitter/3_20', train='train_desumasu.csv', validation='val_desumasu.csv', 
     format='csv', fields=[('src', SRC), ('trg', TRG)])
 
 #学習済みの分散表現をロードする
@@ -43,8 +43,8 @@ japanese_fasttext_vectors = Vectors(name='/content/drive/My Drive/embedding/japa
 print(japanese_fasttext_vectors.dim)
 print(len(japanese_fasttext_vectors.itos))
 
-SRC.build_vocab(train_ds, vectors=japanese_fasttext_vectors, min_freq=2)
-TRG.build_vocab(train_ds, vectors=japanese_fasttext_vectors, min_freq=2)
+SRC.build_vocab(train_ds, vectors=japanese_fasttext_vectors)
+TRG.build_vocab(train_ds, vectors=japanese_fasttext_vectors)
 #SRC.build_vocab(train_ds)
 #TRG.build_vocab(train_ds)
 print(TRG.vocab.stoi)
@@ -85,7 +85,7 @@ class EncoderRNN(nn.Module):
 
     return outputs, encoder_hidden
 
-en = EncoderRNN(300, 600, 2, True, 2000, None, dropout=0)
+en = EncoderRNN(300, 300, 2, True, 2000, None, dropout=0)
 outputs, encoder_hidden = en(torch.randint(0, 1000, size=(128, 20)))
 
 class DecoderRNN(nn.Module):
@@ -102,8 +102,8 @@ class DecoderRNN(nn.Module):
     self.embedding_dropout = nn.Dropout(self.dropout)
     self.lstm = nn.LSTM(emb_size, hidden_size, num_layers, batch_first=True)
     self.out_dropout = nn.Dropout(self.dropout)
-    self.out = nn.Linear(hidden_size*2, output_size)
-    
+    self.out = nn.Linear(hidden_size, output_size)
+
   def forward(self, input_step, decoder_hidden, encoder_outputs):
     embedded = self.embedding(input_step)
     embedded = self.embedding_dropout(embedded)
@@ -114,8 +114,8 @@ class DecoderRNN(nn.Module):
     attn_weights = torch.matmul(rnn_output, encoder_outputs.transpose(2, 1))
     attn_weights = F.softmax(attn_weights, -1)
     attn_applied = torch.bmm(attn_weights, encoder_outputs) 
-    #output = rnn_output + attn_applied
-    output = torch.cat((rnn_output, attn_applied), dim=2)
+    #output = torch.cat((rnn_output, attn_applied), dim=2)
+    output = rnn_output + attn_applied
     output = output.squeeze(1)
     output = self.out_dropout(output)
     output = self.out(output)
@@ -124,9 +124,10 @@ class DecoderRNN(nn.Module):
     return output, hidden
 
 decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>'] for _ in range(batch_size)])
-de = DecoderRNN(300, 600, 2, None, 2000, dropout=0)
-cn = torch.zeros(2, batch_size, 600)
+de = DecoderRNN(300, 300, 2, None, 2000, dropout=0)
+cn = torch.zeros(2, batch_size, 300)
 decoder_hidden = (encoder_hidden, cn)
+print(encoder_hidden.shape)
 decoder_outputs, hidden = de(decoder_input, decoder_hidden, outputs)
 
 def binaryMatrix(l, value=TRG.vocab.stoi['<pad>']):
@@ -195,12 +196,13 @@ def a_batch_loss(input_variable, target_variable, max_target_len, encoder, decod
       decoder_input = decoder_input.to(device)
       #loss += criterion(decoder_output, target_variable[:, t])
       mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[:, t])
-      loss += mask_loss
+      loss += mask_loss * nTotal
       print_losses.append(mask_loss.item() * nTotal)
       n_totals += nTotal
     #total_loss += (loss / max_target_len) #1バッチ分のloss
     
   if phase == 'train':
+    loss = loss / n_totals
     loss.backward()
     #total_loss.backward()
     _ = nn.utils.clip_grad_norm_(encoder.parameters(), clip)
@@ -238,7 +240,7 @@ def train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimize
       print("epoch: {}; phase: {}; Average loss: {:.4f}; PPL: {:.4f}".format(epoch+1, phase, print_loss/i, math.exp(print_loss/i) ))
 
 emb_size = 300
-hidden_size = 600
+hidden_size = 300
 num_layers = 2
 bidirectional = True
 dropout = 0.7
@@ -268,52 +270,35 @@ decoder.train()
 
 train_model(dataloaders_dict, num_epochs, encoder, decoder, encoder_optimizer, decoder_optimizer)
 
-import pickle
+!apt install aptitude swig
 
-model_path = '/content/drive/My Drive/model/TIU_encoder0819.pth'
-torch.save(encoder.to('cpu').state_dict(), model_path)
-model_path = '/content/drive/My Drive/model/TIU_decoder0819.pth'
-torch.save(decoder.to('cpu').state_dict(), model_path)
+!aptitude install mecab libmecab-dev mecab-ipadic-utf8 git make curl xz-utils file -y
 
-model_path = '/content/drive/My Drive/model/cuda_TIU_encoder0819.pth'
-torch.save(encoder.to('cuda').state_dict(), model_path)
-model_path = '/content/drive/My Drive/model/cuda_TIU_decoder0819.pth'
-torch.save(decoder.to('cuda').state_dict(), model_path)
+!pip install mecab-python3
 
-with open('/content/drive/My Drive/model/src_word2index0819.pkl', 'wb') as f:
-    pickle.dump(SRC.vocab.stoi, f)
-with open('/content/drive/My Drive/model/trg_word2index0819.pkl', 'wb') as f:
-    pickle.dump(TRG.vocab.itos, f)
+!git clone --depth 1 https://github.com/neologd/mecab-ipadic-neologd.git
 
-class GreedySearchDecoder(nn.Module):
-    def __init__(self, encoder, decoder):
-        super(GreedySearchDecoder, self).__init__()
-        self.encoder = encoder
-        self.decoder = decoder
+!echo yes | mecab-ipadic-neologd/bin/install-mecab-ipadic-neologd -n -a
 
-    def forward(self, input_seq, input_length, max_length):
-        encoder_outputs, thought_vector = self.encoder(input_seq)
-        cn = torch.zeros(2, 1, hidden_size).to(device)
-        decoder_hidden = (thought_vector, cn)
-        decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>']]).to(device)
-        all_tokens = torch.zeros([0], device=device, dtype=torch.long)
-        all_scores = torch.zeros([0], device=device)
-        for _ in range(max_length):
-            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
-            decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
-            all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
-            all_scores = torch.cat((all_scores, decoder_scores), dim=0)
-            #decoder_input = torch.unsqueeze(decoder_input, 0)
-            
-        return all_tokens, all_scores
+#https://medium.com/@jiraffestaff/mecabrc-%E3%81%8C%E8%A6%8B%E3%81%A4%E3%81%8B%E3%82%89%E3%81%AA%E3%81%84%E3%81%A8%E3%81%84%E3%81%86%E3%82%A8%E3%83%A9%E3%83%BC-b3e278e9ed07
+!pip install unidic-lite
+
+import MeCab
+import subprocess
+
+cmd='echo `mecab-config --dicdir`"/mecab-ipadic-neologd"'
+path = (subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                           shell=True).communicate()[0]).decode('utf-8')
+mecab = MeCab.Tagger("-d {0} -Owakati".format(path))
+#mecab = MeCab.Tagger()
+print(mecab.parse("彼女はペンパイナッポーアッポーペンと恋ダンスを踊った。"))
 
 import unicodedata
 import re
 
 #単語分割、id振り
-#sp.EncodeAsPieces("こんにちは、僕はゴリラです。")
 def indexesFromSentence(sentence):
-    return [SRC.vocab.stoi[word] if word in SRC.vocab.stoi else SRC.vocab.stoi['<unk>'] for word in sp.EncodeAsPieces(sentence)]
+    return [SRC.vocab.stoi[word] if word in SRC.vocab.stoi else SRC.vocab.stoi['<unk>'] for word in mecab.parse(sentence)]
 
 def unicodeToAscii(s):
     return ''.join(
@@ -356,21 +341,131 @@ def evaluate_beam(encoder, decoder, searcher, sentence, max_length=MAX_LENGTH):
 def evaluateInput(encoder, decoder, searcher):
     input_sentence = ''
     while(1):
-        try:
-            input_sentence = input('> ').lower()
-            if input_sentence == 'q' or input_sentence == 'quit': break
-            #前処理
-            input_sentence = normalizeString(input_sentence)
-            output_words = evaluate(encoder, decoder, searcher, input_sentence, MAX_LENGTH)
-            output_words[:] = [x for x in output_words if not (x == '<eos>' or x == '<pad>')]
-            print('Bot:', ' '.join(output_words))
+      try:
+        input_sentence = input('> ').lower()
+        if input_sentence == 'q' or input_sentence == 'quit': break
+        #前処理
+        input_sentence = normalizeString(input_sentence)
+        output_words = evaluate(encoder, decoder, searcher, input_sentence, MAX_LENGTH)
+        output_words[:] = [x for x in output_words if not (x == '<eos>' or x == '<pad>')]
+        print('Bot:', ' '.join(output_words))
 
-        except KeyError:
-            print("Error: Encountered unknown word.")
+      except KeyError:
+        print("Error: Encountered unknown word.")
+
+import numpy as np
+
+class GreedySearchDecoder(nn.Module):
+  def __init__(self, encoder, decoder):
+    super(GreedySearchDecoder, self).__init__()
+    self.encoder = encoder
+    self.decoder = decoder
+
+  def forward(self, input_seq, input_length, max_length):
+    encoder_outputs, thought_vector = self.encoder(input_seq)
+    cn = torch.zeros(2, 1, hidden_size).to(device)
+    decoder_hidden = (thought_vector, cn)
+    decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>']]).to(device)
+    all_tokens = torch.zeros([0], device=device, dtype=torch.long)
+    all_scores = torch.zeros([0], device=device)
+    for _ in range(max_length):
+      decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
+      decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
+      all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
+      all_scores = torch.cat((all_scores, decoder_scores), dim=0)
+            
+    return all_tokens, all_scores
+
+tempreture = 0.3
+
+class GreedyTempreture(nn.Module):
+  def __init__(self, encoder, decoder):
+    super(GreedyTempreture, self).__init__()
+    self.encoder = encoder
+    self.decoder = decoder
+
+  def forward(self, input_seq, input_length, max_length):
+    encoder_outputs, thought_vector = self.encoder(input_seq)
+    cn = torch.zeros(2, 1, hidden_size).to(device)
+    decoder_hidden = (thought_vector, cn)
+    decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>']]).to(device)
+    all_tokens = torch.zeros([0], device=device, dtype=torch.long)
+    all_scores = torch.zeros([0], device=device)
+    for _ in range(max_length):
+      decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)#[batch, vocab]
+      decoder_output = decoder_output.squeeze(0)
+      decoder_output = torch.log(decoder_output) / tempreture
+      decoder_output = torch.exp(decoder_output)
+      decoder_output = decoder_output / sum(decoder_output)
+      decoder_input = torch.tensor([torch.multinomial(decoder_output ,1)], device=device, dtype=torch.long)#decoder_output
+      all_tokens = torch.cat((all_tokens, decoder_input))
+      #all_scores = torch.cat((all_scores, decoder_scores), dim=0)
+            
+    return all_tokens, _
+
+lamb = 0.6 
+gamma = 5
+
+class MMI(nn.Module):
+  def __init__(self, encoder, decoder):
+    super(MMI, self).__init__()
+    self.encoder = encoder
+    self.decoder = decoder
+    self.lm_decoder = decoder
+
+  def forward(self, input_seq, input_length, max_length):
+    #seq2seq用
+    encoder_outputs, thought_vector = self.encoder(input_seq)
+    cn = torch.zeros(2, 1, hidden_size).to(device)
+    decoder_hidden = (thought_vector, cn)
+    #言語モデル用
+    lm_decoder_hidden = (torch.zeros(2, 1, hidden_size).to(device), cn)
+    lm_encoder_outputs = torch.zeros(1, MAX_LENGTH, hidden_size).to(device)
+    #共通で使う
+    decoder_input = torch.LongTensor([TRG.vocab.stoi['<cls>']]).to(device)
+    all_tokens = torch.zeros([0], device=device, dtype=torch.long)
+    all_scores = torch.zeros([0], device=device)
+    for i in range(max_length):
+      if i <= gamma-1:
+        #seq2seqの出力
+        decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
+        #言語モデルの出力
+        lm_decoder_output, lm_decoder_hidden = self.lm_decoder(decoder_input, lm_decoder_hidden, lm_encoder_outputs)
+        #
+        #decoder_input = torch.log(decoder_output) - lamb*torch.log(lm_decoder_output)
+        decoder_scores, decoder_input = torch.max(decoder_input, dim=1)
+        all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
+        all_scores = torch.cat((all_scores, decoder_scores), dim=0)
+      else:
+        decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
+        decoder_scores, decoder_input = torch.max(decoder_output, dim=1)
+        all_tokens = torch.cat((all_tokens, decoder_input), dim=0)
+        all_scores = torch.cat((all_scores, decoder_scores), dim=0)
+            
+    return all_tokens, all_scores
 
 encoder.eval()
 decoder.eval()
 
-searcher = GreedySearchDecoder(encoder, decoder)
+#searcher = GreedySearchDecoder(encoder, decoder)
+#searcher = GreedyTempreture(encoder, decoder)
+searcher = MMI(encoder, decoder)
 evaluateInput(encoder, decoder, searcher)
+
+import pickle
+
+model_path = '/content/drive/My Drive/model/TIU_encoder0829.pth'
+torch.save(encoder.to('cpu').state_dict(), model_path)
+model_path = '/content/drive/My Drive/model/TIU_decoder0829.pth'
+torch.save(decoder.to('cpu').state_dict(), model_path)
+
+model_path = '/content/drive/My Drive/model/cuda_TIU_encoder0829.pth'
+torch.save(encoder.to('cuda').state_dict(), model_path)
+model_path = '/content/drive/My Drive/model/cuda_TIU_decoder0829.pth'
+torch.save(decoder.to('cuda').state_dict(), model_path)
+
+with open('/content/drive/My Drive/model/src_word2index0829.pkl', 'wb') as f:
+    pickle.dump(SRC.vocab.stoi, f)
+with open('/content/drive/My Drive/model/trg_word2index0829.pkl', 'wb') as f:
+    pickle.dump(TRG.vocab.itos, f)
 
