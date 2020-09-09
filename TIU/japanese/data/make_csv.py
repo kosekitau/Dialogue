@@ -30,7 +30,6 @@ def normalizeString(text):
     return s
 
 def make(path):
-    ratio = 1.0
     with open(path + '.txt') as f:
         #txtデータの読み込み
         data = f.readlines()
@@ -38,17 +37,30 @@ def make(path):
         opt = []
         gomi = 0
         iiyo = 0
+        ratio = 0.1
 
         for i in range(0, len(data)-1, 2):
             inp_parse = mecab.parse(normalizeString(data[i])).split()
             opt_parse = mecab.parse(normalizeString(data[i+1])).split()
             if length_cut(inp_parse, opt_parse):
                 if opt_parse[0] == '私':
-                    pass
-
+                    continue
+                if '好き' in opt_parse:
+                    if random.random() < ratio:
+                        inp.append(' '.join(inp_parse))
+                        opt.append(' '.join(opt_parse))
+                        iiyo+=1
+                    else:
+                        gomi+=1
+                        continue
                 else:
                     inp.append(' '.join(inp_parse))
                     opt.append(' '.join(opt_parse))
+            """
+            if length_cut(inp_parse, opt_parse):
+                inp.append(' '.join(inp_parse))
+                opt.append(' '.join(opt_parse))
+            """
 
         df = pd.DataFrame({0:inp, 1:opt})
         print('len:', len(df))
@@ -62,6 +74,6 @@ def make(path):
         df[:-1000].to_csv('train_' + path + '.csv', header=None, index=None)
         df[-1000:].to_csv('val_' + path + '.csv', header=None, index=None)
 
-paths = ['2020-08-30']
+paths = ['0907']
 for path in paths:
     make(path)
